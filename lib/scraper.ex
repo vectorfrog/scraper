@@ -17,29 +17,30 @@ defmodule Scraper do
   Ends the current ChromeDriver session.
   """
   def end_session do
+    ChromeDriver.start()
     Hound.end_session()
-    ChromeDriver.stop()
   end
 
   @doc """
   Loads a web page by URL and waits for it to fully load.
   """
-  def load_page(url) do
+  def load_page(url, initial_wait_time \\ 1000, retry_wait_time \\ 100) do
     navigate_to(url)
-    wait_for_page_load()
+    wait_for_page_load(initial_wait_time, retry_wait_time)
   end
 
-  defp wait_for_page_load do
+  defp wait_for_page_load(initial_wait_time, retry_wait_time) do
     # Initial wait for any potential redirects
-    :timer.sleep(1000)
+    :timer.sleep(initial_wait_time)
 
     case execute_script("return document.readyState === 'complete';") do
       true ->
         :ok
 
       false ->
-        :timer.sleep(100)
-        wait_for_page_load()
+        :timer.sleep(retry_wait_time)
+        # Only use the retry wait time for subsequent retries
+        wait_for_page_load(0, retry_wait_time)
     end
   end
 
@@ -59,6 +60,7 @@ defmodule Scraper do
 
     links
     |> Enum.map(&attribute_value(&1, "href"))
+    |> IO.inspect(label: "links")
   end
 
   defp ends_with_space_a?(string) do
@@ -85,12 +87,17 @@ defmodule Scraper do
     * `:site_restricted` - only scrape links within the base URL.
     * `:domain_restricted` - only scrape links within the same domain.
     * `:base_url` - custom base URL for link filtering.
+    * `:initial_wait_time` - initial wait time for the page to load (default is 1000 ms).
+    * `:retry_wait_time` - retry wait time for the page to load (default is 100 ms).
   """
   def scrape(url, opts \\ []) do
     Scraper.start_session()
 
     try do
-      load_page(url)
+      initial_wait_time = Keyword.get(opts, :initial_wait_time, 1000)
+      retry_wait_time = Keyword.get(opts, :retry_wait_time, 100)
+
+      load_page(url, initial_wait_time, retry_wait_time)
       base_url = Keyword.get(opts, :base_url, get_base_url(url))
       domain = URI.parse(base_url).host
 
@@ -103,7 +110,12 @@ defmodule Scraper do
         |> Enum.uniq()
         |> Enum.filter(&filter_link(&1, base_url, domain, opts))
 
-      content = Enum.map(links, &fetch_page_content(&1, content_selector))
+      content =
+        Enum.map(
+          links,
+          &fetch_page_content(&1, content_selector, initial_wait_time, retry_wait_time)
+        )
+
       {links, content}
     rescue
       error -> IO.inspect(error, label: "Error")
@@ -129,12 +141,13 @@ defmodule Scraper do
   Fetches the content of a web page given its URL.
   If a CSS selector is provided, returns the HTML within that element, otherwise returns the entire page's HTML.
   """
-  def fetch_page_content(link, selector \\ nil) do
-    load_page(link)
+  def fetch_page_content(link, selector \\ nil, initial_wait_time, retry_wait_time) do
+    Status.info("loading: #{link}")
+    load_page(link, initial_wait_time, retry_wait_time)
 
     script =
       if selector do
-        "return document.querySelector(arguments[0]).outerHTML;"
+        "return document.querySelector(arguments[0])?.outerHTML || '';"
       else
         "return document.documentElement.outerHTML;"
       end
